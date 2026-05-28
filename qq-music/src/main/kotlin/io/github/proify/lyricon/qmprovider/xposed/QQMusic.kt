@@ -34,6 +34,10 @@ object QQMusic : YukiBaseHooker() {
 
     private const val ACTION_LYRIC_SETTINGS_CHANGED =
         "io.github.proify.lyricon.ACTION_SETTINGS_CHANGED"
+    private const val ACTION_PLAYER_READY =
+        "io.github.proify.lyricon.ACTION_PLAYER_READY"
+    private const val ACTION_SETTINGS_SNAPSHOT =
+        "io.github.proify.lyricon.ACTION_SETTINGS_SNAPSHOT"
     private const val PREF_NAME_QQMUSIC = "qqmusicplayer"
     private const val KEY_DISPLAY_TRANS = "showtranslyric"
     private const val KEY_DISPLAY_ROMA = "showromalyric"
@@ -51,6 +55,9 @@ object QQMusic : YukiBaseHooker() {
 
     /**
      * 处理主进程逻辑：监听 QQ 音乐内部设置变更并广播
+     *
+     * 同时监听来自 PlayerService 的就绪握手广播，将当前设置值主动推送过去，
+     * 解决 PlayerService 重启后无法通过跨进程 SharedPreferences 读取初始值的问题。
      */
     private class MainProcessHook {
         fun hook(loader: ClassLoader) {
@@ -77,6 +84,39 @@ object QQMusic : YukiBaseHooker() {
                         }
                     }
                 }
+
+            onAppLifecycle {
+                onCreate {
+                    registerPlayerReadyReceiver(this)
+                }
+            }
+        }
+
+        /**
+         * 监听 PlayerService 就绪握手。
+         * PlayerService 启动完成后会发送 ACTION_PLAYER_READY，主进程收到后
+         * 立即把当前 SharedPreferences 里的真实值以 ACTION_SETTINGS_SNAPSHOT
+         * 广播回 PlayerService，彻底替代跨进程直读 prefs 的方案。
+         */
+        private fun registerPlayerReadyReceiver(application: Application) {
+            val filter = IntentFilter(ACTION_PLAYER_READY)
+            ContextCompat.registerReceiver(application, object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    val ctx = context ?: return
+                    // 主进程在自己进程里读取——这里是可靠的
+                    val prefs = ctx.getSharedPreferences(PREF_NAME_QQMUSIC, Context.MODE_PRIVATE)
+                    val trans = prefs.getBoolean(KEY_DISPLAY_TRANS, false)
+                    val roma  = prefs.getBoolean(KEY_DISPLAY_ROMA, false)
+
+                    val snapshot = Intent(ACTION_SETTINGS_SNAPSHOT).apply {
+                        putExtra(KEY_DISPLAY_TRANS, trans)
+                        putExtra(KEY_DISPLAY_ROMA, roma)
+                        setPackage(ctx.packageName)
+                    }
+                    ctx.sendBroadcast(snapshot)
+                    Log.d(TAG, "Player ready, pushed settings snapshot: trans=$trans roma=$roma")
+                }
+            }, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         }
     }
 
@@ -92,6 +132,8 @@ object QQMusic : YukiBaseHooker() {
                     DiskSongCache.initialize(this)
                     setupLyriconProvider(this)
                     registerSettingsReceiver(this)
+                    // 所有接收器注册完毕后，通知主进程推送当前设置快照
+                    sendReadyBroadcast(this)
                 }
             }
 
@@ -128,19 +170,45 @@ object QQMusic : YukiBaseHooker() {
         }
 
         private fun registerSettingsReceiver(application: Application) {
-            val filter = IntentFilter(ACTION_LYRIC_SETTINGS_CHANGED)
+            val filter = IntentFilter().apply {
+                addAction(ACTION_LYRIC_SETTINGS_CHANGED)
+                addAction(ACTION_SETTINGS_SNAPSHOT)
+            }
 
             ContextCompat.registerReceiver(application, object : BroadcastReceiver() {
                 override fun onReceive(context: Context?, intent: Intent?) {
-                    val key = intent?.getStringExtra("setting_key") ?: return
-                    val value = intent.getBooleanExtra("setting_value", false)
-
-                    when (key) {
-                        KEY_DISPLAY_TRANS -> lyriconProvider?.player?.setDisplayTranslation(value)
-                        KEY_DISPLAY_ROMA -> lyriconProvider?.player?.setDisplayRoma(value)
+                    when (intent?.action) {
+                        ACTION_LYRIC_SETTINGS_CHANGED -> {
+                            val key = intent.getStringExtra("setting_key") ?: return
+                            val value = intent.getBooleanExtra("setting_value", false)
+                            applySettingChange(key, value)
+                        }
+                        ACTION_SETTINGS_SNAPSHOT -> {
+                            // 主进程在收到握手后推来的完整初始快照
+                            val trans = intent.getBooleanExtra(KEY_DISPLAY_TRANS, false)
+                            val roma  = intent.getBooleanExtra(KEY_DISPLAY_ROMA, false)
+                            Log.d(TAG, "Received settings snapshot: trans=$trans roma=$roma")
+                            lyriconProvider?.player?.setDisplayTranslation(trans)
+                            lyriconProvider?.player?.setDisplayRoma(roma)
+                        }
                     }
                 }
             }, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        }
+
+        private fun applySettingChange(key: String, value: Boolean) {
+            when (key) {
+                KEY_DISPLAY_TRANS -> lyriconProvider?.player?.setDisplayTranslation(value)
+                KEY_DISPLAY_ROMA  -> lyriconProvider?.player?.setDisplayRoma(value)
+            }
+        }
+
+        private fun sendReadyBroadcast(application: Application) {
+            val intent = Intent(ACTION_PLAYER_READY).apply {
+                setPackage(application.packageName)
+            }
+            application.sendBroadcast(intent)
+            Log.d(TAG, "Player ready broadcast sent")
         }
 
         private fun setupLyriconProvider(application: Application) {
@@ -151,12 +219,11 @@ object QQMusic : YukiBaseHooker() {
                 logo = ProviderLogo.fromSvg(Constants.ICON)
             )
 
-            // 初始化显示设置
-            val prefs = application.getSharedPreferences(PREF_NAME_QQMUSIC, Context.MODE_PRIVATE)
-            provider.player.apply {
-                setDisplayTranslation(prefs.getBoolean(KEY_DISPLAY_TRANS, false))
-                setDisplayRoma(prefs.getBoolean(KEY_DISPLAY_ROMA, false))
-            }
+            // 不在此处读取 SharedPreferences。
+            // PlayerService 进程无法可靠地跨进程读取主进程写入的 "qqmusicplayer" prefs
+            // （Android 7+ 禁止 MODE_WORLD_READABLE，跨进程读只会得到空文件的默认值）。
+            // 真实初始值由握手机制获取：setupLyriconProvider 完成后 sendReadyBroadcast()
+            // 通知主进程，主进程在自己进程内读取 prefs 后通过 ACTION_SETTINGS_SNAPSHOT 推回来。
 
             provider.register()
             this.lyriconProvider = provider
