@@ -13,8 +13,8 @@ object MediaMetadataCache {
     private val map = mutableMapOf<String, Metadata>()
 
     fun save(metadata: MediaMetadata): Metadata? {
-        val id = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID) ?: return null
-        if (id.isBlank()) return null
+        val id = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)
+        if (id.isNullOrBlank()) return null
         if (map.containsKey(id)) {
             return map[id]
         }
