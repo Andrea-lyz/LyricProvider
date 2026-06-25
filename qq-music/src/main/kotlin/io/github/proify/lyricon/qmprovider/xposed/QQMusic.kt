@@ -191,6 +191,7 @@ object QQMusic : YukiBaseHooker() {
 
         private fun updateLyriconSong(song: Song?) {
             lyriconProvider?.player?.setSong(song)
+            SaltLyricBridge.send(appContext, song)
         }
 
         override fun onDownloadFinished(response: LyricResponse) {
