@@ -9,17 +9,28 @@ package io.github.proify.lyricon.amprovider.xposed
 import android.app.Application
 import com.highcapable.yukihookapi.hook.log.YLog
 import de.robv.android.xposed.XposedHelpers
+import java.lang.reflect.Method
 
 class LyricRequester(
     private val classLoader: ClassLoader,
     private val application: Application
 ) {
     private var playerLyricsViewModel: Any? = null
+    private var loadLyricsMethod: Method? = null
+
+    fun setPlayerLyricsViewModel(instance: Any?) {
+        if (instance == null) return
+        playerLyricsViewModel = instance
+    }
+
+    fun setLoadLyricsMethod(method: Method) {
+        method.isAccessible = true
+        loadLyricsMethod = method
+    }
 
     fun requestDownload(playbackItem: Any) {
         try {
-            XposedHelpers.callMethod(ensurePlayerLyricsViewModel(), "loadLyrics", playbackItem)
-            YLog.debug("LyricRequester: Triggered download from real PlaybackItem")
+            callLoadLyrics(playbackItem)
         } catch (e: Exception) {
             YLog.error("LyricRequester: Failed to trigger download from PlaybackItem", e)
         }
@@ -32,7 +43,6 @@ class LyricRequester(
      */
     fun requestDownload(mediaId: String) {
         if (mediaId.isBlank()) {
-            YLog.debug("LyricRequester: mediaId is null or blank")
             return
         }
         try {
@@ -41,12 +51,20 @@ class LyricRequester(
             XposedHelpers.callMethod(song, "setId", mediaId)
             XposedHelpers.callMethod(song, "setHasLyrics", true)
 
-            XposedHelpers.callMethod(ensurePlayerLyricsViewModel(), "loadLyrics", song)
-            YLog.debug("LyricRequester: Triggered download for $mediaId")
-
+            callLoadLyrics(song)
         } catch (e: Exception) {
             YLog.error("LyricRequester: Failed to trigger download", e)
         }
+    }
+
+    private fun callLoadLyrics(playbackItem: Any) {
+        val viewModel = ensurePlayerLyricsViewModel()
+        val method = loadLyricsMethod
+        if (method != null && method.declaringClass.isInstance(viewModel)) {
+            method.invoke(viewModel, playbackItem)
+            return
+        }
+        XposedHelpers.callMethod(viewModel, "loadLyrics", playbackItem)
     }
 
     private fun ensurePlayerLyricsViewModel(): Any {

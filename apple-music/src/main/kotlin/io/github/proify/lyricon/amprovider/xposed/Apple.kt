@@ -25,21 +25,34 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.luckypray.dexkit.DexKitBridge
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 
 object Apple : YukiBaseHooker() {
+    private const val APPLE_METADATA_KEY_MEDIA_ID =
+        "com.apple.android.music.playback.metadata.METADATA_KEY_MEDIA_ID"
+    private const val APPLE_METADATA_KEY_PLAYBACK_ENDPOINT_TYPE =
+        "com.apple.android.music.playback.metadata.METADATA_KEY_PLAYBACK_ENDPOINT_TYPE"
+
     private lateinit var application: Application
     private lateinit var classLoader: ClassLoader
 
     private var isPlaying = false
     private var exoMediaPlayerInstance: Any? = null
     private var getPositionMethod: Method? = null
+    private var dexKitBridge: DexKitBridge? = null
 
     private val coroutineScope by lazy { CoroutineScope(Dispatchers.Default + SupervisorJob()) }
     private var progressJob: Job? = null
 
     private var provider: LyriconProvider? = null
+    private var lyricRequester: LyricRequester? = null
+
+    init {
+        runCatching { System.loadLibrary("dexkit") }
+            .onFailure { YLog.error("load dexkit failed", it) }
+    }
 
     override fun onHook() {
         onAppLifecycle {
@@ -50,6 +63,11 @@ object Apple : YukiBaseHooker() {
     private fun onAppCreate() {
         application = appContext ?: return
         classLoader = appClassLoader ?: return
+        dexKitBridge = runCatching {
+            DexKitBridge.create(appInfo.sourceDir)
+        }.onFailure {
+            YLog.error("create Apple DexKitBridge failed", it)
+        }.getOrNull()
         PreferencesMonitor.initialize(application)
         PreferencesMonitor.listener = object : PreferencesMonitor.Listener {
             override fun onTranslationSelectedChanged(selected: Boolean) {
@@ -71,16 +89,18 @@ object Apple : YukiBaseHooker() {
                 playerPackageName = application.packageName,
                 logo = ProviderLogo.fromBase64(Constants.ICON)
             )
+        val requester = LyricRequester(classLoader, application)
 
         PlaybackManager.init(
             remotePlayer = helper.player,
-            requester = LyricRequester(classLoader, application),
+            requester = requester,
             application = application
         )
 
         helper.player.setDisplayTranslation(PreferencesMonitor.isTranslationSelected())
         helper.register()
         this.provider = helper
+        this.lyricRequester = requester
     }
 
     private fun startHooks() {
@@ -101,19 +121,28 @@ object Apple : YukiBaseHooker() {
                 classLoader.loadClass("com.apple.android.music.player.viewmodel.PlayerLyricsViewModel")
             val playbackItemClass =
                 classLoader.loadClass("com.apple.android.music.model.PlaybackItem")
-            val method = viewModelClass.getDeclaredMethod("loadLyrics", playbackItemClass)
-                .apply { isAccessible = true }
+            val method = findLoadLyricsMethod(viewModelClass, playbackItemClass)
+                ?: error("loadLyrics method not found")
+            lyricRequester?.setLoadLyricsMethod(method)
+
+            viewModelClass.declaredConstructors.forEach { constructor ->
+                constructor.isAccessible = true
+                constructor.hook {
+                    after {
+                        lyricRequester?.setPlayerLyricsViewModel(instanceOrNull)
+                    }
+                }
+            }
 
             method.hook {
                 before {
+                    lyricRequester?.setPlayerLyricsViewModel(instanceOrNull)
                     PlaybackManager.onPlaybackItemObserved(
                         playbackItem = args.getOrNull(0),
-                        source = "PlayerLyricsViewModel.loadLyrics",
                         requestIfMissing = false
                     )
                 }
             }
-            YLog.debug("hookPlaybackItemLoadMethod Hooked: $method")
         }.onFailure {
             YLog.error("hookPlaybackItemLoadMethod failed", it)
         }
@@ -121,12 +150,10 @@ object Apple : YukiBaseHooker() {
 
     private fun hookPlaybackItemConvertMethod() {
         runCatching {
-            val mapperClass = classLoader.loadClass("com.apple.android.music.player.N")
             val playbackItemClass = classLoader.loadClass("com.apple.android.music.model.PlaybackItem")
-            val methods = mapperClass.declaredMethods.filter { method ->
-                Modifier.isStatic(method.modifiers)
-                        && playbackItemClass.isAssignableFrom(method.returnType)
-                        && method.parameterCount == 1
+            val methods = findPlaybackItemMapperMethods(playbackItemClass)
+            if (methods.isEmpty()) {
+                error("playback item mapper method not found")
             }
 
             methods.forEach { method ->
@@ -135,13 +162,11 @@ object Apple : YukiBaseHooker() {
                     after {
                         PlaybackManager.onPlaybackItemObserved(
                             playbackItem = this.result,
-                            source = "PlayerMetadataMapper.${method.name}",
                             requestIfMissing = true
                         )
                     }
                 }
             }
-            YLog.debug("hookPlaybackItemConvertMethod Hooked: ${methods.size}")
         }.onFailure {
             YLog.error("hookPlaybackItemConvertMethod failed", it)
         }
@@ -151,7 +176,6 @@ object Apple : YukiBaseHooker() {
         runCatching {
             val method = findMediaMetadataChangeMethod()
             if (method == null) {
-                YLog.debug("hookMediaMetadataChange skipped: method not found")
                 return@runCatching
             }
 
@@ -159,11 +183,9 @@ object Apple : YukiBaseHooker() {
                 after {
                     val mediaMetadata = args[0] as? MediaMetadata ?: return@after
                     val metadata = MediaMetadataCache.putAndGet(mediaMetadata) ?: return@after
-                    YLog.debug("MediaMetadataCompat captured id=${metadata.id}")
                     PlaybackManager.onSongChanged(metadata.id)
                 }
             }
-            YLog.debug("hookMediaMetadataChange Hooked: $method")
         }.onFailure {
             YLog.error("hookMediaMetadataChange failed", it)
         }
@@ -175,31 +197,25 @@ object Apple : YukiBaseHooker() {
                 classLoader.loadClass("com.apple.android.music.player.viewmodel.PlayerLyricsViewModel")
             val songInfoPtrClass =
                 classLoader.loadClass("com.apple.android.music.ttml.javanative.model.SongInfo\$SongInfoPtr")
-            val method = viewModelClass.getDeclaredMethod(
-                "buildTimeRangeToLyricsMap",
-                songInfoPtrClass
-            ).apply { isAccessible = true }
+            val method = findLyricBuildMethod(viewModelClass, songInfoPtrClass)
+                ?: error("buildTimeRangeToLyricsMap method not found")
 
             method.hook {
                 after {
                     val songInfoPtr = args.getOrNull(0)
                     if (songInfoPtr == null) {
-                        YLog.debug("buildTimeRangeToLyricsMap: null SongInfoPtr")
                         return@after
                     }
 
                     val songNative = XposedHelpers.callMethod(songInfoPtr, "get")
                     if (songNative == null) {
-                        YLog.debug("buildTimeRangeToLyricsMap: null SongInfoNative")
                         return@after
                     }
 
                     prepareSongInfoNativeForBridge(songNative)
-                    YLog.debug("buildTimeRangeToLyricsMap captured: $songNative")
                     PlaybackManager.onLyricsBuilt(songNative)
                 }
             }
-            YLog.debug("hookLyricBuildMethod Hooked: $method")
         }.onFailure {
             YLog.error("hookLyricBuildMethod failed", it)
         }
@@ -216,24 +232,14 @@ object Apple : YukiBaseHooker() {
         }.getOrNull()
 
         if (language.isNullOrBlank()) {
-            YLog.debug("prepare Apple lyrics translation skipped: language empty")
             return
         }
 
-        val available = runCatching {
-            XposedHelpers.callMethod(songNative, "hasTranslation", language) as? Boolean
-        }.getOrDefault(false)
-
-        val applied = runCatching {
+        runCatching {
             XposedHelpers.callMethod(songNative, "setTranslation", language) as? Boolean
         }.onFailure {
             YLog.error("set Apple lyrics translation failed language=$language", it)
-        }.getOrDefault(false)
-
-        YLog.debug(
-            "Prepared Apple lyrics translation language=$language, " +
-                    "available=$available, applied=$applied"
-        )
+        }
     }
 
     private fun hookExoMediaPlayer() {
@@ -331,4 +337,78 @@ object Apple : YukiBaseHooker() {
                         && it.parameterCount == 1
                         && it.returnType.simpleName.contains("MediaMetadata")
             }
+
+    private fun findLoadLyricsMethod(
+        viewModelClass: Class<*>,
+        playbackItemClass: Class<*>
+    ): Method? =
+        viewModelClass.declaredMethods.firstOrNull { method ->
+            method.name == "loadLyrics" &&
+                    method.parameterCount == 1 &&
+                    playbackItemClass.isAssignableFrom(method.parameterTypes[0])
+        }?.apply { isAccessible = true }
+            ?: viewModelClass.declaredMethods.firstOrNull { method ->
+                method.parameterCount == 1 &&
+                        playbackItemClass.isAssignableFrom(method.parameterTypes[0]) &&
+                        method.returnType == Void.TYPE
+            }?.apply { isAccessible = true }
+
+    private fun findLyricBuildMethod(
+        viewModelClass: Class<*>,
+        songInfoPtrClass: Class<*>
+    ): Method? =
+        runCatching {
+            viewModelClass.getDeclaredMethod("buildTimeRangeToLyricsMap", songInfoPtrClass)
+        }.getOrNull()?.apply { isAccessible = true }
+            ?: viewModelClass.declaredMethods.firstOrNull { method ->
+                !Modifier.isStatic(method.modifiers) &&
+                        method.parameterCount == 1 &&
+                        method.parameterTypes[0] == songInfoPtrClass &&
+                        method.returnType == Void.TYPE
+            }?.apply { isAccessible = true }
+
+    private fun findPlaybackItemMapperMethods(playbackItemClass: Class<*>): List<Method> {
+        val candidates = sequence {
+            yield("com.apple.android.music.player.N")
+            yield("com.apple.android.music.player.M")
+            findPlaybackItemMapperClassesByDexKit().forEach { yield(it.name) }
+        }.distinct()
+
+        return candidates
+            .mapNotNull { className ->
+                runCatching { classLoader.loadClass(className) }
+                    .getOrNull()
+            }
+            .flatMap { mapperClass -> mapperClass.playbackItemMapperMethods(playbackItemClass) }
+            .distinctBy { "${it.declaringClass.name}#${it.name}${it.parameterTypes.joinToString()}" }
+            .onEach { it.isAccessible = true }
+            .toList()
+    }
+
+    private fun findPlaybackItemMapperClassesByDexKit(): List<Class<*>> {
+        val bridge = dexKitBridge ?: return emptyList()
+        return runCatching {
+            bridge.findClass {
+                searchPackages("com.apple.android.music.player")
+                matcher {
+                    usingStrings(
+                        APPLE_METADATA_KEY_MEDIA_ID,
+                        APPLE_METADATA_KEY_PLAYBACK_ENDPOINT_TYPE
+                    )
+                }
+            }.mapNotNull { classData ->
+                runCatching { classData.getInstance(classLoader) }
+                    .getOrNull()
+            }
+        }.onFailure {
+            YLog.error("Apple DexKit mapper search failed", it)
+        }.getOrDefault(emptyList())
+    }
+
+    private fun Class<*>.playbackItemMapperMethods(playbackItemClass: Class<*>): List<Method> =
+        declaredMethods.filter { method ->
+            Modifier.isStatic(method.modifiers) &&
+                    playbackItemClass.isAssignableFrom(method.returnType) &&
+                    method.parameterCount == 1
+        }
 }

@@ -7,7 +7,6 @@
 package io.github.proify.lyricon.amprovider.xposed.util
 
 import android.text.Html
-import android.util.Log
 import io.github.proify.lyricon.amprovider.xposed.model.AppleSong
 import io.github.proify.lyricon.amprovider.xposed.model.LyricLine
 import io.github.proify.lyricon.lyric.model.LyricWord
@@ -36,7 +35,6 @@ object AppleSongMapper {
 
     private fun convertLyrics(appleLyrics: List<LyricLine>): MutableList<RichLyricLine> {
         val keepFlags = appleLyrics.map { shouldKeepLeadLyricLine(it) }
-        logAppleLyricSourcePreview(appleLyrics, keepFlags)
 
         return appleLyrics.filterIndexed { index, _ -> keepFlags.getOrElse(index) { false } }
             .map { appleLine ->
@@ -83,37 +81,6 @@ object AppleSongMapper {
         return true
     }
 
-    private fun logAppleLyricSourcePreview(
-        appleLyrics: List<LyricLine>,
-        keepFlags: List<Boolean>
-    ) {
-        if (appleLyrics.isEmpty()) return
-
-        val dropped = keepFlags.count { !it }
-        val entries = appleLyrics
-            .mapIndexed { index, line -> index to line }
-            .sortedBy { it.second.begin }
-            .map { (index, line) ->
-                val keep = keepFlags.getOrElse(index) { false }
-                "#$index ${line.begin}-${line.end} ${if (keep) "keep" else "drop"}" +
-                    " text=${shortenForLog(cleanPlainText(line.htmlLineText))}" +
-                    " trans=${shortenForLog(cleanPlainText(line.htmlTranslationLineText))}" +
-                    " bg=${shortenForLog(cleanPlainText(line.htmlBackgroundVocalsLineText))}" +
-                    " words=${line.words.size}/${line.backgroundWords.size}"
-            }
-        Log.i(
-            TAG,
-            "Apple lyric source summary, lines=${appleLyrics.size}, kept=${appleLyrics.size - dropped}, " +
-                "dropped=$dropped"
-        )
-        entries.chunked(12).forEachIndexed { chunkIndex, chunk ->
-            Log.i(
-                TAG,
-                "Apple lyric source preview ${chunkIndex + 1}: ${chunk.joinToString(" | ")}"
-            )
-        }
-    }
-
     private fun isShortBackingVocal(text: String): Boolean {
         val normalized = cleanPlainText(text)
             .replace(" ", "")
@@ -145,11 +112,6 @@ object AppleSongMapper {
             .replace('\n', ' ')
             .replace(Regex("\\s+"), " ")
             .trim()
-    }
-
-    private fun shortenForLog(value: String): String {
-        if (value.isBlank()) return "-"
-        return if (value.length <= 32) value else value.substring(0, 29) + "..."
     }
 
     private fun io.github.proify.lyricon.amprovider.xposed.model.LyricWord.toLyricWord(): LyricWord =

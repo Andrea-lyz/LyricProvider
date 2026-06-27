@@ -28,7 +28,6 @@ object SaltLyricBridge {
         val lyricLines = filteredLyricLines(song)
         val rawLyric = toEnhancedLrc(song, lyricLines)
         if (!containsTimedLrc(rawLyric)) {
-            Log.d(TAG, "Skip bridge payload without timed lyric, id=${song.id.orEmpty()}")
             return
         }
 
@@ -54,14 +53,6 @@ object SaltLyricBridge {
 
         runCatching {
             context.sendBroadcast(intent)
-        }.onSuccess {
-            Log.d(
-                TAG,
-                "Sent Apple Music bridge payload, id=${song.id.orEmpty()}, " +
-                    "lines=${lyricLines.size}/${song.lyrics?.size ?: 0}, " +
-                    "rawChars=${rawLyric.length}, transChars=${translationLyric.length}, " +
-                    "first=${shortenForLog(lyricLines.firstOrNull()?.text.orEmpty())}"
-            )
         }.onFailure { e ->
             Log.w(TAG, "Failed to send Apple Music bridge payload, id=${song.id.orEmpty()}", e)
         }
