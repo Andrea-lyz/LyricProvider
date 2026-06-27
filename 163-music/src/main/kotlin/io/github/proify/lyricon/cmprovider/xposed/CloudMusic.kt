@@ -256,6 +256,7 @@ object CloudMusic : YukiBaseHooker() {
             if (lastSetSong == song) return
             lastSetSong = song
             lyricProvider?.player?.setSong(song)
+            SaltLyricBridge.send(appContext, song)
         }
     }
 }

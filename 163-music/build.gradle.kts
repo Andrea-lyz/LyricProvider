@@ -22,8 +22,8 @@ configure<ApplicationExtension> {
         applicationId = "io.github.proify.lyricon.cmprovider"
         minSdk = 28
         targetSdk = rootProject.extra.get("targetSdkVersion") as Int
-        versionCode = 7
-        versionName = "1.0.5-beta1"
+        versionCode = 8
+        versionName = "1.0.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -39,7 +39,12 @@ configure<ApplicationExtension> {
 
     buildTypes {
         getByName("debug") {
-            signingConfig = signingConfigs.getByName("release")
+            val releaseSigning = signingConfigs.getByName("release")
+            signingConfig = if (releaseSigning.storeFile?.exists() == true) {
+                releaseSigning
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
         getByName("release") {
             signingConfig = signingConfigs.getByName("release")

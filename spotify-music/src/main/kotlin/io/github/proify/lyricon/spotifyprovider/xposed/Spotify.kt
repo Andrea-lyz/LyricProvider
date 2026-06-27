@@ -74,6 +74,7 @@ object Spotify : YukiBaseHooker(), DownloadCallback {
                 after {
                     val state = (args[0] as? PlaybackState) ?: return@after
                     lyriconProvider?.player?.setPlaybackState(state)
+                    SaltLyricBridge.sendPlaybackState(appContext, state)
                 }
             }
 
@@ -150,5 +151,6 @@ object Spotify : YukiBaseHooker(), DownloadCallback {
     private fun setSong(song: Song) {
         lastSong = song
         lyriconProvider?.player?.setSong(song)
+        SaltLyricBridge.send(appContext, song)
     }
 }

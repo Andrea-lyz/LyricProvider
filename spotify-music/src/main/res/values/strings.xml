@@ -7,6 +7,6 @@
 <resources>
     <string name="app_name">Spotify歌词支持</string>
 
-    <string name="xposed_description">为词幕提供Spotify歌词</string>
-    <string name="lyricon_module_description">提供Spotify音乐歌词。</string>
+    <string name="xposed_description">为词幕和 ColorOS Live Lyrics Bridge 提供 Spotify 歌词</string>
+    <string name="lyricon_module_description">为词幕和 ColorOS Live Lyrics Bridge 提供 Spotify 音乐歌词。</string>
 </resources>

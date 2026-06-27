@@ -19,7 +19,7 @@
     <string name="title_auto_save">Auto-save to Local</string>
     <string name="desc_auto_save">Save searched lyrics as same-name LRC files</string>
 
-    <string name="lyricon_module_description">Lyric adapter for PowerAmp Music Player. Supports embedded lyrics and online lyric fetching.</string>
+    <string name="lyricon_module_description">Lyric adapter for PowerAmp Music Player. Supports embedded lyrics, online lyric fetching, and Lyricon.</string>
     <string name="lyricon_module_category">Local Player</string>
     <string name="lyricon_module_author">newcovid</string>
 </resources>
