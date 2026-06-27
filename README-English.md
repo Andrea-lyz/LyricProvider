@@ -19,7 +19,7 @@
 
 | Platform                             | Identifier          | Description                                        |
 |:-------------------------------------|:--------------------|:---------------------------------------------------|
-| 🍎 **Apple Music**                   | `apple-music`       | Supports dynamic lyrics, translated lyrics         |
+| 🍎 **Apple Music**                   | `apple-music`       | Supports word-timed and translated lyrics; excludes background vocals and duet lanes |
 | ☁️ **Netease Music**                 | `163-music`         | Supports dynamic lyrics, translated lyrics         |
 | 🐧 **QQ Music**                      | `qq-music`          | Supports dynamic lyrics, translated lyrics         |
 | 🐧 **QQ Music HD**                   | `qq-music-hd`       | Supports dynamic lyrics, translated lyrics         |

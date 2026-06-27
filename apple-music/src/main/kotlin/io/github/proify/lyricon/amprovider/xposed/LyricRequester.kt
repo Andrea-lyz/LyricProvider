@@ -16,6 +16,15 @@ class LyricRequester(
 ) {
     private var playerLyricsViewModel: Any? = null
 
+    fun requestDownload(playbackItem: Any) {
+        try {
+            XposedHelpers.callMethod(ensurePlayerLyricsViewModel(), "loadLyrics", playbackItem)
+            YLog.debug("LyricRequester: Triggered download from real PlaybackItem")
+        } catch (e: Exception) {
+            YLog.error("LyricRequester: Failed to trigger download from PlaybackItem", e)
+        }
+    }
+
     /**
      * 欺骗 Apple Music 触发歌词下载
      *
@@ -32,18 +41,20 @@ class LyricRequester(
             XposedHelpers.callMethod(song, "setId", mediaId)
             XposedHelpers.callMethod(song, "setHasLyrics", true)
 
-            if (playerLyricsViewModel == null) {
-                playerLyricsViewModel = classLoader
-                    .loadClass("com.apple.android.music.player.viewmodel.PlayerLyricsViewModel")
-                    .getConstructor(Application::class.java)
-                    .newInstance(application)
-            }
-
-            XposedHelpers.callMethod(playerLyricsViewModel, "loadLyrics", song)
+            XposedHelpers.callMethod(ensurePlayerLyricsViewModel(), "loadLyrics", song)
             YLog.debug("LyricRequester: Triggered download for $mediaId")
 
         } catch (e: Exception) {
             YLog.error("LyricRequester: Failed to trigger download", e)
         }
+    }
+
+    private fun ensurePlayerLyricsViewModel(): Any {
+        playerLyricsViewModel?.let { return it }
+        return classLoader
+            .loadClass("com.apple.android.music.player.viewmodel.PlayerLyricsViewModel")
+            .getConstructor(Application::class.java)
+            .newInstance(application)
+            .also { playerLyricsViewModel = it }
     }
 }

@@ -32,14 +32,10 @@ object Apple : YukiBaseHooker() {
     private lateinit var application: Application
     private lateinit var classLoader: ClassLoader
 
-    // 播放器状态
     private var isPlaying = false
-
-    // 反射缓存
     private var exoMediaPlayerInstance: Any? = null
     private var getPositionMethod: Method? = null
 
-    // 协程作用域
     private val coroutineScope by lazy { CoroutineScope(Dispatchers.Default + SupervisorJob()) }
     private var progressJob: Job? = null
 
@@ -64,7 +60,6 @@ object Apple : YukiBaseHooker() {
         DiskSongManager.initialize(application)
         initScreenStateMonitor()
         initProvider()
-
         startHooks()
     }
 
@@ -79,7 +74,8 @@ object Apple : YukiBaseHooker() {
 
         PlaybackManager.init(
             remotePlayer = helper.player,
-            requester = LyricRequester(classLoader, application)
+            requester = LyricRequester(classLoader, application),
+            application = application
         )
 
         helper.player.setDisplayTranslation(PreferencesMonitor.isTranslationSelected())
@@ -88,64 +84,158 @@ object Apple : YukiBaseHooker() {
     }
 
     private fun startHooks() {
-        hookExoMediaPlayer()
+        hookPlaybackItemLoadMethod()
+        hookPlaybackItemConvertMethod()
         hookMediaMetadataChange()
         hookLyricBuildMethod()
-
-//        XposedHelpers.findAndHookMethod(
-//            "com.apple.android.music.player.viewmodel.PlayerLyricsViewModel",
-//            classLoader,
-//            "loadLyrics",
-//            classLoader.loadClass("com.apple.android.music.model.PlaybackItem"),
-//            object : XC_MethodHook() {
-//                @Throws(Throwable::class)
-//                override fun afterHookedMethod(param: MethodHookParam?) {
-//                    val arg = param?.args?.get(0) ?: return
-//                    ObjectUtils.print(arg)
-//                }
-//            })
-    }
-
-    // --- Hook 1: 歌曲切换监听 ---
-    private fun hookMediaMetadataChange() {
-        val method = findMediaMetadataChangeMethod() ?: return
-
-        method.hook {
-            after {
-                val mediaMetadata = args[0] as? MediaMetadata ?: return@after
-                val metadata = MediaMetadataCache.putAndGet(mediaMetadata) ?: return@after
-
-                // 委托给 Manager 处理
-                PlaybackManager.onSongChanged(metadata.id)
-            }
+        runCatching {
+            hookExoMediaPlayer()
+        }.onFailure {
+            YLog.error("hookExoMediaPlayer failed", it)
         }
     }
 
-    // --- Hook 2: 歌词构建监听 ---
-    private fun hookLyricBuildMethod() {
-        val m =
-            classLoader.loadClass("com.apple.android.music.player.viewmodel.PlayerLyricsViewModel")
-                .resolve()
-                .firstMethod { name = "buildTimeRangeToLyricsMap" }
-                .hook {
-                    after {
-                        YLog.debug("buildTimeRangeToLyricsMap:$args")
-                        val arg: Any? = args[0]
-                        if (arg == null) {
-                            YLog.debug("args0 null")
-                            return@after
-                        }
-                        val songNative = XposedHelpers.callMethod(arg, "get")
-                        YLog.debug("songNative: $songNative")
+    private fun hookPlaybackItemLoadMethod() {
+        runCatching {
+            val viewModelClass =
+                classLoader.loadClass("com.apple.android.music.player.viewmodel.PlayerLyricsViewModel")
+            val playbackItemClass =
+                classLoader.loadClass("com.apple.android.music.model.PlaybackItem")
+            val method = viewModelClass.getDeclaredMethod("loadLyrics", playbackItemClass)
+                .apply { isAccessible = true }
 
-                        // 委托给 Manager 处理
-                        PlaybackManager.onLyricsBuilt(songNative)
-                    }
+            method.hook {
+                before {
+                    PlaybackManager.onPlaybackItemObserved(
+                        playbackItem = args.getOrNull(0),
+                        source = "PlayerLyricsViewModel.loadLyrics",
+                        requestIfMissing = false
+                    )
                 }
-        YLog.debug("hookLyricBuildMethod Hooked: $m")
+            }
+            YLog.debug("hookPlaybackItemLoadMethod Hooked: $method")
+        }.onFailure {
+            YLog.error("hookPlaybackItemLoadMethod failed", it)
+        }
     }
 
-    // --- Hook 3: 播放器控制  ---
+    private fun hookPlaybackItemConvertMethod() {
+        runCatching {
+            val mapperClass = classLoader.loadClass("com.apple.android.music.player.N")
+            val playbackItemClass = classLoader.loadClass("com.apple.android.music.model.PlaybackItem")
+            val methods = mapperClass.declaredMethods.filter { method ->
+                Modifier.isStatic(method.modifiers)
+                        && playbackItemClass.isAssignableFrom(method.returnType)
+                        && method.parameterCount == 1
+            }
+
+            methods.forEach { method ->
+                method.isAccessible = true
+                method.hook {
+                    after {
+                        PlaybackManager.onPlaybackItemObserved(
+                            playbackItem = this.result,
+                            source = "PlayerMetadataMapper.${method.name}",
+                            requestIfMissing = true
+                        )
+                    }
+                }
+            }
+            YLog.debug("hookPlaybackItemConvertMethod Hooked: ${methods.size}")
+        }.onFailure {
+            YLog.error("hookPlaybackItemConvertMethod failed", it)
+        }
+    }
+
+    private fun hookMediaMetadataChange() {
+        runCatching {
+            val method = findMediaMetadataChangeMethod()
+            if (method == null) {
+                YLog.debug("hookMediaMetadataChange skipped: method not found")
+                return@runCatching
+            }
+
+            method.hook {
+                after {
+                    val mediaMetadata = args[0] as? MediaMetadata ?: return@after
+                    val metadata = MediaMetadataCache.putAndGet(mediaMetadata) ?: return@after
+                    YLog.debug("MediaMetadataCompat captured id=${metadata.id}")
+                    PlaybackManager.onSongChanged(metadata.id)
+                }
+            }
+            YLog.debug("hookMediaMetadataChange Hooked: $method")
+        }.onFailure {
+            YLog.error("hookMediaMetadataChange failed", it)
+        }
+    }
+
+    private fun hookLyricBuildMethod() {
+        runCatching {
+            val viewModelClass =
+                classLoader.loadClass("com.apple.android.music.player.viewmodel.PlayerLyricsViewModel")
+            val songInfoPtrClass =
+                classLoader.loadClass("com.apple.android.music.ttml.javanative.model.SongInfo\$SongInfoPtr")
+            val method = viewModelClass.getDeclaredMethod(
+                "buildTimeRangeToLyricsMap",
+                songInfoPtrClass
+            ).apply { isAccessible = true }
+
+            method.hook {
+                after {
+                    val songInfoPtr = args.getOrNull(0)
+                    if (songInfoPtr == null) {
+                        YLog.debug("buildTimeRangeToLyricsMap: null SongInfoPtr")
+                        return@after
+                    }
+
+                    val songNative = XposedHelpers.callMethod(songInfoPtr, "get")
+                    if (songNative == null) {
+                        YLog.debug("buildTimeRangeToLyricsMap: null SongInfoNative")
+                        return@after
+                    }
+
+                    prepareSongInfoNativeForBridge(songNative)
+                    YLog.debug("buildTimeRangeToLyricsMap captured: $songNative")
+                    PlaybackManager.onLyricsBuilt(songNative)
+                }
+            }
+            YLog.debug("hookLyricBuildMethod Hooked: $method")
+        }.onFailure {
+            YLog.error("hookLyricBuildMethod failed", it)
+        }
+    }
+
+    private fun prepareSongInfoNativeForBridge(songNative: Any) {
+        val language = runCatching {
+            classLoader
+                .loadClass("com.apple.android.music.playback.util.LocaleUtil")
+                .getDeclaredMethod("getSystemLyricsLanguage")
+                .invoke(null) as? String
+        }.onFailure {
+            YLog.error("resolve Apple lyrics language failed", it)
+        }.getOrNull()
+
+        if (language.isNullOrBlank()) {
+            YLog.debug("prepare Apple lyrics translation skipped: language empty")
+            return
+        }
+
+        val available = runCatching {
+            XposedHelpers.callMethod(songNative, "hasTranslation", language) as? Boolean
+        }.getOrDefault(false)
+
+        val applied = runCatching {
+            XposedHelpers.callMethod(songNative, "setTranslation", language) as? Boolean
+        }.onFailure {
+            YLog.error("set Apple lyrics translation failed language=$language", it)
+        }.getOrDefault(false)
+
+        YLog.debug(
+            "Prepared Apple lyrics translation language=$language, " +
+                    "available=$available, applied=$applied"
+        )
+    }
+
     private fun hookExoMediaPlayer() {
         val exoPlayerClass =
             classLoader.loadClass("com.apple.android.music.playback.player.ExoMediaPlayer")
@@ -183,8 +273,6 @@ object Apple : YukiBaseHooker() {
                 }
             }
     }
-
-    // --- 进度同步逻辑 ---
 
     private fun startSyncAction() {
         if (isPlaying) return
